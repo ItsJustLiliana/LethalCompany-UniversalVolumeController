@@ -100,7 +100,7 @@ jobs:
         uses: ncipollo/release-action@v1
         with:
           tag: v${{ steps.manifest.outputs.version }}
-          name: Universal Volume Controller
+          name: UVC v${{ steps.manifest.outputs.version }}
           body: ""
           allowUpdates: true
           artifactErrorsFailBuild: true
