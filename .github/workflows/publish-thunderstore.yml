@@ -71,6 +71,12 @@ jobs:
         shell: pwsh
         run: ./scripts/package-thunderstore.ps1 -OutputZip artifacts/UniversalVolumeController.zip
 
+      - name: Preserve package for release step
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/uvc-release"
+          cp artifacts/UniversalVolumeController.zip "$RUNNER_TEMP/uvc-release/UniversalVolumeController.zip"
+
       - name: Upload to Thunderstore
         uses: GreenTF/upload-thunderstore-package@v4.3
         with:
@@ -98,4 +104,4 @@ jobs:
           body: ""
           allowUpdates: true
           artifactErrorsFailBuild: true
-          artifacts: artifacts/UniversalVolumeController.zip
+          artifacts: ${{ runner.temp }}/uvc-release/UniversalVolumeController.zip
