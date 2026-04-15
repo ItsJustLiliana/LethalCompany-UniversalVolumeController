@@ -65,6 +65,7 @@ jobs:
         run: |
           echo "version=$(jq -r '.version_number' manifest.json)" >> "$GITHUB_OUTPUT"
           echo "description=$(jq -r '.description' manifest.json)" >> "$GITHUB_OUTPUT"
+          echo "website=$(jq -r '.website_url' manifest.json)" >> "$GITHUB_OUTPUT"
 
       - name: Create Thunderstore zip package
         shell: pwsh
@@ -75,10 +76,18 @@ jobs:
         with:
           token: ${{ secrets.THUNDERSTORE_TOKEN }}
           community: lethal-company
+          repo: thunderstore.io
           namespace: ItsJustLiliana
           name: UniversalVolumeController
           version: ${{ steps.manifest.outputs.version }}
           description: ${{ steps.manifest.outputs.description }}
+          website: ${{ steps.manifest.outputs.website }}
+          categories: |
+            clientside
+            audio
+            bepinex
+          deps: |
+            BepInEx-BepInExPack@5.4.2100
           file: artifacts/UniversalVolumeController.zip
 
       - name: Create GitHub Release
