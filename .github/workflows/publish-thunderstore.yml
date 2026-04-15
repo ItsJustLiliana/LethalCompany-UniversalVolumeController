@@ -31,8 +31,32 @@ jobs:
         with:
           dotnet-version: 8.0.x
 
-      - name: Attempt build to produce DLL
-        continue-on-error: true
+      - name: Validate bundled dependency DLLs
+        shell: pwsh
+        run: |
+          $required = @(
+            "dependencies/BepInEx.dll",
+            "dependencies/0Harmony.dll",
+            "dependencies/Assembly-CSharp.dll",
+            "dependencies/UnityEngine.dll",
+            "dependencies/UnityEngine.CoreModule.dll",
+            "dependencies/UnityEngine.AudioModule.dll",
+            "dependencies/UnityEngine.UIModule.dll",
+            "dependencies/UnityEngine.UI.dll",
+            "dependencies/UnityEngine.TextRenderingModule.dll",
+            "dependencies/UnityEngine.IMGUIModule.dll",
+            "dependencies/UnityEngine.InputLegacyModule.dll",
+            "dependencies/Unity.Netcode.Runtime.dll",
+            "dependencies/Unity.InputSystem.dll"
+          )
+
+          $missing = $required | Where-Object { -not (Test-Path -LiteralPath $_) }
+          if ($missing.Count -gt 0) {
+            $missing | ForEach-Object { Write-Host "Missing required dependency: $_" }
+            throw "One or more required dependency DLLs are missing from the repository."
+          }
+
+      - name: Build plugin DLL
         run: dotnet build UniversalVolumeController.csproj -c Release
 
       - name: Parse manifest metadata
