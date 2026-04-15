@@ -43,7 +43,12 @@ if (-not (Test-Path -LiteralPath $outputDirectory)) {
     New-Item -ItemType Directory -Path $outputDirectory | Out-Null
 }
 
-$stagingDir = Join-Path $env:TEMP "uvc-thunderstore-package"
+$tempRoot = $env:RUNNER_TEMP
+if ([string]::IsNullOrWhiteSpace($tempRoot)) { $tempRoot = $env:TEMP }
+if ([string]::IsNullOrWhiteSpace($tempRoot)) { $tempRoot = $env:TMP }
+if ([string]::IsNullOrWhiteSpace($tempRoot)) { $tempRoot = [System.IO.Path]::GetTempPath() }
+
+$stagingDir = Join-Path $tempRoot "uvc-thunderstore-package"
 if (Test-Path -LiteralPath $stagingDir) {
     Remove-Item -LiteralPath $stagingDir -Recurse -Force
 }
