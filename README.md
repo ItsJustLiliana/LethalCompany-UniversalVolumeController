@@ -2,13 +2,13 @@
 
 Client-side volume control for all items and other sounds within the game
 
-Tired of loud noises? Tired of your friends blasting the air horn in your ears? TURN IT OFF
+Tired of loud noises? Tired of your friends blasting the air horn in your ears? TURN IT OFF!
 Each individual item / sound can be lowered in volume or be fully muted.
 
 ## Features
 
 - In-game menu toggle by pressing ```F10```
-- Global volume slider with quick mute and unmute.
+- Global volume slider with quick mute and unmute
 - Per-category controls for:
   - Item Sounds
   - Environment
@@ -25,6 +25,11 @@ Each individual item / sound can be lowered in volume or be fully muted.
 - ```F9``` + ```F10```: Dump active audio sources to the log
 - ```F9``` + ```F10``` + ```LeftCtrl```: Dump all audio sources (including non-playing)
 
-## Notes
+### Notes
 
-- This mod is designed for player-side control and does not synchronize volume values to other players
+- This mod is designed for player-side control and does not synchronize volume values to other players.
+- Some audio tracks don't seem to lower in volume, but that's because it is barely noticable sometimes. When dropping it beneath 50% you'll most likely start to hear the difference. I might tweak that in a later version.
+
+### Known Issues
+
+- Some audio tracks are not in their respective tab yet

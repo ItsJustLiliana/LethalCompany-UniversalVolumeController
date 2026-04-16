@@ -9,17 +9,24 @@ using BepInEx.Configuration;
 using BepInEx.Logging;
 using HarmonyLib;
 using UnityEngine;
+using LethalCompanyInputUtils.Api;
 using UnityEngine.InputSystem;
 
+[BepInDependency("com.rune580.LethalCompanyInputUtils", BepInDependency.DependencyFlags.HardDependency)]
 [BepInPlugin(PluginGuid, PluginName, PluginVersion)]
 public class UniversalVolumeControllerPlugin : BaseUnityPlugin
 {
-    public const string PluginGuid = "com.marij.universalvolumecontroller";
+    public const string PluginGuid = "com.itsjustliliana.universalvolumecontroller";
     public const string PluginName = "Universal Volume Controller";
-    public const string PluginVersion = "1.0.0";
+    public const string PluginVersion = "1.1.10";
 
     internal static UniversalVolumeControllerPlugin Instance = null!;
     internal static ManualLogSource Log = null!;
+    private static bool _respawnAttempted;
+    private static bool _harmonyPatched;
+    private static bool _startupHintsLogged;
+    private static UniversalVolumeControllerInputActions _sharedInputActions = null!;
+    private static bool _sharedInputActionsInitialized;
 
     private const int MinPercent = 1;
     private const int MaxPercent = 100;
@@ -50,9 +57,13 @@ public class UniversalVolumeControllerPlugin : BaseUnityPlugin
     private CursorLockMode _previousCursorLockState;
     private bool _realtimeRefreshEnabled = true;
     private bool _loggedRealtimeFailure;
-    private Coroutine _discoEndOfFrameEnforceCoroutine;
+    private bool _isQuitting;
+    private UniversalVolumeControllerInputActions _inputActions = null!;
     private float _nextRealtimeRefreshAt;
     private float _nextRealtimeScanAt;
+    private bool _loggedNullActionReferences;
+    private bool _audioPausedByPlugin;
+    private bool _audioPauseStateBeforeFocusLoss;
 
     private readonly object _lock = new object();
     private readonly Dictionary<string, ConfigEntry<int>> _itemEntries = new Dictionary<string, ConfigEntry<int>>();
@@ -93,7 +104,6 @@ public class UniversalVolumeControllerPlugin : BaseUnityPlugin
     private GUIStyle _tabStyle = null!;
     private GUIStyle _tabActiveStyle = null!;
     private GUIStyle _tabDimStyle = null!;
-    private GUIStyle _toggleStyle = null!;
     private GUIStyle _sliderStyle = null!;
     private GUIStyle _sliderThumbStyle = null!;
     private GUIStyle _searchFieldStyle = null!;
@@ -111,12 +121,15 @@ public class UniversalVolumeControllerPlugin : BaseUnityPlugin
     private bool _sceneHasDiscoBall;
     private bool _dumpedDiscoAudioGraph;
     private bool _debugAudioPlayback;
-    private bool _indepthDebugAudioPlayback;
+    private bool _inDepthDebugAudioPlayback;
     private bool _infoDebugAudioPlayback;
 
     private const float WindowDragStripHeight = 28f;
     private const float WindowResizeGripHeight = 20f;
     private const float CategoryEnableTipDuration = 5f;
+    private const string SearchBoxControlName = "UniversalVolumeController_SearchBox";
+    private const float RealtimeRefreshInterval = 0.14f;
+    private const float RealtimeScanInterval = 2.0f;
 
     private static readonly HashSet<string> SplitWords = new HashSet<string>
     {
@@ -137,7 +150,7 @@ public class UniversalVolumeControllerPlugin : BaseUnityPlugin
 
     private static readonly string[] OtherKeywords =
     {
-        "terminal", "intercom", "alarm", "speaker", "jingle", "theme", "ui", "menu", "button", "diagetic", "nondiagetic"
+        "terminal", "intercom", "alarm", "speaker", "jingle", "theme", "ui", "menu", "button", "diegetic", "non-diegetic"
     };
 
     private static readonly string[] ThemeNames =
@@ -161,8 +174,16 @@ public class UniversalVolumeControllerPlugin : BaseUnityPlugin
 
     private void Awake()
     {
+        if (Instance != null && !ReferenceEquals(Instance, this))
+        {
+            Logger.LogWarning($"Duplicate plugin instance detected; destroying this instance id={GetInstanceID()} existingId={Instance.GetInstanceID()}");
+            Destroy(this);
+            return;
+        }
+
         Instance = this;
         Log = Logger;
+        DontDestroyOnLoad(gameObject);
 
         ModEnabled = Config.Bind("General", "Enabled", true, "Enable or disable this mod entirely.");
         GlobalPercent = Config.Bind("General", "GlobalPercent", 100, new ConfigDescription("Global volume percentage.", new AcceptableValueRange<int>(0, MaxPercent)));
@@ -175,7 +196,7 @@ public class UniversalVolumeControllerPlugin : BaseUnityPlugin
         DebugAudioResolution = Config.Bind("Debug", "AudioResolutionLogs", false, "Log category/key/multiplier decisions for tracked audio sources.");
         DebugInfoByDefault = Config.Bind("Debug", "PlaybackInfoByDefault", false, "Enable additional playback info logs by default for F5 audio debugging.");
         _debugAudioPlayback = false;
-        _indepthDebugAudioPlayback = false;
+        _inDepthDebugAudioPlayback = false;
         _infoDebugAudioPlayback = DebugInfoByDefault.Value;
         if (GlobalPercent.Value > 0)
         {
@@ -183,31 +204,88 @@ public class UniversalVolumeControllerPlugin : BaseUnityPlugin
         }
 
         BuildDefaultAliases();
+        try
+        {
+            if (!_sharedInputActionsInitialized)
+            {
+                _sharedInputActions = new UniversalVolumeControllerInputActions();
+                _sharedInputActions.Enable();
+                _sharedInputActionsInitialized = true;
+            }
+
+            _inputActions = _sharedInputActions;
+        }
+        catch (Exception ex)
+        {
+            _inputActions = null!;
+            Logger.LogError($"Input action initialization failed. {ex}");
+        }
 
         _harmony = new Harmony(PluginGuid);
-        _harmony.PatchAll();
+        if (!_harmonyPatched)
+        {
+            _harmony.PatchAll();
+            _harmonyPatched = true;
+        }
 
-        Logger.LogInfo($"{PluginName} loaded. Toggle UI with F10.");
-        Logger.LogInfo("Volume changes are client-side only (local AudioSource volume).\n");
-        Logger.LogInfo("F9+F10 prints all active audio sources. F5 toggles playback logs, LeftAlt+F5 toggles in-depth logs, LeftCtrl+F5 toggles info logs, LeftShift+F5 prints managed sound groups.");
+        if (!_startupHintsLogged)
+        {
+            _startupHintsLogged = true;
+            Logger.LogInfo($"{PluginName} loaded. Toggle UI with F10");
+            //Logger.LogInfo("Volume changes are client-side only (local AudioSource volume)");
+            //Logger.LogInfo("F9+F10 prints all active audio sources. F5 toggles playback logs, LeftAlt+F5 toggles in-depth logs, LeftCtrl+F5 toggles info logs, LeftShift+F5 prints managed sound groups");
+        }
 
         if (DebugAudioDiscovery.Value || DebugAudioResolution.Value)
         {
             Logger.LogInfo($"[Debug] discovery={DebugAudioDiscovery.Value} resolution={DebugAudioResolution.Value} items={ItemSoundsEnabled.Value} env={EnvironmentSoundsEnabled.Value} other={OtherSoundsEnabled.Value} opacity={OpacityPercent.Value} theme={ThemeColorIndex.Value}");
         }
 
-        _discoEndOfFrameEnforceCoroutine = StartCoroutine(DiscoEndOfFrameEnforceLoop());
     }
 
     private void OnDestroy()
     {
-        SetMenuVisible(false);
-        _harmony.UnpatchSelf();
-
-        if (_discoEndOfFrameEnforceCoroutine != null)
+        if (!ReferenceEquals(Instance, this))
         {
-            StopCoroutine(_discoEndOfFrameEnforceCoroutine);
-            _discoEndOfFrameEnforceCoroutine = null;
+            return;
+        }
+
+        if (!_isQuitting && !_respawnAttempted)
+        {
+            _respawnAttempted = true;
+            try
+            {
+                Instance = null!;
+                GameObject host = new GameObject("UniversalVolumeControllerHost");
+                DontDestroyOnLoad(host);
+                host.AddComponent<UniversalVolumeControllerPlugin>();
+                // Logger.LogWarning("Unexpected plugin teardown detected; respawned plugin on UniversalVolumeControllerHost.");
+            }
+            catch (Exception ex)
+            {
+                Logger.LogError($"Failed to respawn plugin after unexpected teardown: {ex}");
+            }
+        }
+
+        SetMenuVisible(false);
+
+        if (_inputActions != null)
+        {
+            try
+            {
+                if (_isQuitting && _sharedInputActionsInitialized && _sharedInputActions != null)
+                {
+                    _sharedInputActions.Disable();
+                    _sharedInputActions = null!;
+                    _sharedInputActionsInitialized = false;
+                }
+            }
+            catch
+            {
+                // Ignore shutdown issues.
+            }
+
+            _inputActions = null!;
         }
 
         if (_bgTex != null)
@@ -223,38 +301,78 @@ public class UniversalVolumeControllerPlugin : BaseUnityPlugin
             Destroy(_scrollbarTrackTex);
             Destroy(_searchBgTex);
         }
+
+        if (ReferenceEquals(Instance, this))
+        {
+            Instance = null!;
+        }
+
+        if (_isQuitting && _harmony != null)
+        {
+            _harmony.UnpatchSelf();
+            _harmonyPatched = false;
+        }
+    }
+
+    private void OnApplicationQuit()
+    {
+        _isQuitting = true;
     }
 
     private void Update()
     {
+        Keyboard keyboard = Keyboard.current;
+
+        if (_inputActions == null)
+        {
+            return;
+        }
+
+        InputAction toggleAction = _inputActions.ToggleMenuKey;
+        InputAction dumpAction = _inputActions.DumpAudioKey;
+        InputAction debugAction = _inputActions.AudioDebugKey;
+        InputAction closeAction = _inputActions.CloseMenuKey;
+        if (toggleAction == null || dumpAction == null || debugAction == null || closeAction == null)
+        {
+            if (!_loggedNullActionReferences)
+            {
+                Logger.LogWarning($"One or more input actions are null. toggleNull={(toggleAction == null)} dumpNull={(dumpAction == null)} debugNull={(debugAction == null)} closeNull={(closeAction == null)}");
+                _loggedNullActionReferences = true;
+            }
+
+            return;
+        }
+
+        if (toggleAction.triggered)
+        {
+            SetMenuVisible(!_uiVisible);
+        }
+
         if (!_isAppFocused)
         {
             return;
         }
 
-        Keyboard keyboard = Keyboard.current;
-        if (IsAudioDumpComboPressed(keyboard))
+        if (dumpAction.triggered && toggleAction.IsPressed())
         {
-            bool includeAllSources = keyboard != null && (keyboard.leftCtrlKey.isPressed || keyboard.rightCtrlKey.isPressed);
+            bool includeAllSources = IsCtrlHeld(keyboard);
             DumpAllActiveAudioSources(includeHierarchy: false, includeExtraInfo: false, includeAllSources: includeAllSources);
             return;
         }
 
-        if (keyboard != null && keyboard.f10Key.wasPressedThisFrame)
+        if (debugAction.triggered)
         {
-            SetMenuVisible(!_uiVisible);
+            HandleAudioDebugHotkeys(keyboard);
         }
 
-        HandleAudioDebugHotkeys(keyboard);
-
-        if (_uiVisible && keyboard != null && keyboard.escapeKey.wasPressedThisFrame)
+        if (_uiVisible && closeAction.triggered)
         {
             SetMenuVisible(false);
         }
 
         if (_realtimeRefreshEnabled && Time.unscaledTime >= _nextRealtimeRefreshAt)
         {
-            _nextRealtimeRefreshAt = Time.unscaledTime + 0.08f;
+            _nextRealtimeRefreshAt = Time.unscaledTime + RealtimeRefreshInterval;
             try
             {
                 VolumeRuntime.RefreshKnownSources();
@@ -271,7 +389,7 @@ public class UniversalVolumeControllerPlugin : BaseUnityPlugin
 
         if (_realtimeRefreshEnabled && Time.unscaledTime >= _nextRealtimeScanAt)
         {
-            _nextRealtimeScanAt = Time.unscaledTime + 1.0f;
+            _nextRealtimeScanAt = Time.unscaledTime + RealtimeScanInterval;
             try
             {
                 VolumeRuntime.ScanActiveSources();
@@ -310,39 +428,11 @@ public class UniversalVolumeControllerPlugin : BaseUnityPlugin
         }
     }
 
-    private IEnumerator DiscoEndOfFrameEnforceLoop()
-    {
-        WaitForEndOfFrame wait = new WaitForEndOfFrame();
-        while (true)
-        {
-            yield return wait;
-
-            if (!_isAppFocused || !_realtimeRefreshEnabled)
-            {
-                continue;
-            }
-
-            try
-            {
-                VolumeRuntime.RefreshDiscoSourcesLate();
-            }
-            catch
-            {
-                // Keep this hard-enforcement loop resilient.
-            }
-        }
-    }
-
     private void HandleAudioDebugHotkeys(Keyboard keyboard)
     {
-        if (keyboard == null || !keyboard.f5Key.wasPressedThisFrame)
-        {
-            return;
-        }
-
-        bool altHeld = keyboard.leftAltKey.isPressed || keyboard.rightAltKey.isPressed;
-        bool ctrlHeld = keyboard.leftCtrlKey.isPressed || keyboard.rightCtrlKey.isPressed;
-        bool shiftHeld = keyboard.leftShiftKey.isPressed || keyboard.rightShiftKey.isPressed;
+        bool altHeld = IsAltHeld(keyboard);
+        bool ctrlHeld = IsCtrlHeld(keyboard);
+        bool shiftHeld = IsShiftHeld(keyboard);
 
         if (shiftHeld)
         {
@@ -352,7 +442,7 @@ public class UniversalVolumeControllerPlugin : BaseUnityPlugin
 
         if (altHeld)
         {
-            ToggleIndepthAudioDebug();
+            ToggleInDepthAudioDebug();
             return;
         }
 
@@ -362,41 +452,39 @@ public class UniversalVolumeControllerPlugin : BaseUnityPlugin
             return;
         }
 
-        if (altHeld)
-        {
-            ToggleIndepthAudioDebug();
-            return;
-        }
-
         ToggleAudioDebug();
     }
 
-    private static bool IsAudioDumpComboPressed(Keyboard keyboard)
+    private bool IsAltHeld(Keyboard keyboard)
     {
-        if (keyboard == null)
-        {
-            return false;
-        }
-
-        bool bothDown = keyboard.f9Key.isPressed && keyboard.f10Key.isPressed;
-        bool eitherPressedThisFrame = keyboard.f9Key.wasPressedThisFrame || keyboard.f10Key.wasPressedThisFrame;
-        return bothDown && eitherPressedThisFrame;
+        return keyboard != null && (keyboard.leftAltKey.isPressed || keyboard.rightAltKey.isPressed);
     }
+
+    private bool IsCtrlHeld(Keyboard keyboard)
+    {
+        return keyboard != null && (keyboard.leftCtrlKey.isPressed || keyboard.rightCtrlKey.isPressed);
+    }
+
+    private bool IsShiftHeld(Keyboard keyboard)
+    {
+        return keyboard != null && (keyboard.leftShiftKey.isPressed || keyboard.rightShiftKey.isPressed);
+    }
+
     private void ToggleAudioDebug()
     {
         _debugAudioPlayback = !_debugAudioPlayback;
         if (!_debugAudioPlayback)
         {
-            _indepthDebugAudioPlayback = false;
+            _inDepthDebugAudioPlayback = false;
         }
 
         Logger.LogInfo($"[AudioDebug] playback logs {(_debugAudioPlayback ? "enabled" : "disabled")}");
     }
 
-    private void ToggleIndepthAudioDebug()
+    private void ToggleInDepthAudioDebug()
     {
         _debugAudioPlayback = !_debugAudioPlayback;
-        _indepthDebugAudioPlayback = _debugAudioPlayback;
+        _inDepthDebugAudioPlayback = _debugAudioPlayback;
         _infoDebugAudioPlayback = _debugAudioPlayback;
         Logger.LogInfo($"[AudioDebug] in-depth playback logs {(_debugAudioPlayback ? "enabled" : "disabled")}");
     }
@@ -536,7 +624,7 @@ public class UniversalVolumeControllerPlugin : BaseUnityPlugin
         string positionText = position.HasValue ? $" pos={position.Value}" : string.Empty;
         string scaleText = volumeScale.HasValue ? $" scale={volumeScale.Value:0.###}" : string.Empty;
 
-        if (!_indepthDebugAudioPlayback)
+        if (!_inDepthDebugAudioPlayback)
         {
             Logger.LogInfo($"[AudioDebug] {methodName} source={sourceName} clip={clipName}{scaleText}{positionText}");
         }
@@ -556,22 +644,53 @@ public class UniversalVolumeControllerPlugin : BaseUnityPlugin
     private void OnApplicationFocus(bool hasFocus)
     {
         _isAppFocused = hasFocus;
+        ApplyFocusAudioState(hasFocus);
         if (!hasFocus)
         {
             SetMenuVisible(false);
             return;
         }
 
-        _nextRealtimeRefreshAt = Time.unscaledTime + 0.1f;
-        _nextRealtimeScanAt = Time.unscaledTime + 0.5f;
+        _nextRealtimeRefreshAt = Time.unscaledTime + 0.06f;
+        _nextRealtimeScanAt = Time.unscaledTime + 0.2f;
     }
 
     private void OnApplicationPause(bool paused)
     {
         _isAppFocused = !paused;
+        ApplyFocusAudioState(!paused);
         if (paused)
         {
             SetMenuVisible(false);
+        }
+    }
+
+    private void ApplyFocusAudioState(bool hasFocus)
+    {
+        try
+        {
+            if (hasFocus)
+            {
+                if (_audioPausedByPlugin)
+                {
+                    AudioListener.pause = _audioPauseStateBeforeFocusLoss;
+                    _audioPausedByPlugin = false;
+                }
+
+                return;
+            }
+
+            if (!_audioPausedByPlugin)
+            {
+                _audioPauseStateBeforeFocusLoss = AudioListener.pause;
+            }
+
+            AudioListener.pause = true;
+            _audioPausedByPlugin = true;
+        }
+        catch
+        {
+            // Ignore focus-related audio state failures and keep gameplay stable.
         }
     }
 
@@ -726,9 +845,9 @@ public class UniversalVolumeControllerPlugin : BaseUnityPlugin
 
         GUILayout.BeginHorizontal(_rowBoxStyle, GUILayout.Height(38f));
         GUILayout.Label("Search", _labelStyle, GUILayout.Width(160f));
-        GUI.SetNextControlName("UniversalVolumeController_SearchBox");
+        GUI.SetNextControlName(SearchBoxControlName);
         string nextSearch = GUILayout.TextField(_searchQuery, _searchFieldStyle, GUILayout.Height(30f), GUILayout.ExpandWidth(true));
-        if (string.IsNullOrWhiteSpace(nextSearch) && GUI.GetNameOfFocusedControl() != "UniversalVolumeController_SearchBox")
+        if (string.IsNullOrWhiteSpace(nextSearch) && GUI.GetNameOfFocusedControl() != SearchBoxControlName)
         {
             Rect lastRect = GUILayoutUtility.GetLastRect();
             GUI.Label(new Rect(lastRect.x + 8f, lastRect.y + 4f, lastRect.width - 8f, lastRect.height - 4f), "Search sounds...", _valueStyle);
@@ -1029,23 +1148,29 @@ public class UniversalVolumeControllerPlugin : BaseUnityPlugin
         }
 
         int clamped = Mathf.Clamp(value, MinPercent, MaxPercent);
-        Dictionary<string, int> cache = category == SoundCategory.Item
-            ? _lastItemNonZeroPercent
-            : (category == SoundCategory.Environment ? _lastEnvironmentNonZeroPercent : _lastOtherNonZeroPercent);
+        Dictionary<string, int> cache = GetLastNonZeroCache(category);
         cache[key] = clamped;
     }
 
     private int GetLastNonZero(SoundCategory category, string key)
     {
-        Dictionary<string, int> cache = category == SoundCategory.Item
-            ? _lastItemNonZeroPercent
-            : (category == SoundCategory.Environment ? _lastEnvironmentNonZeroPercent : _lastOtherNonZeroPercent);
+        Dictionary<string, int> cache = GetLastNonZeroCache(category);
         if (cache.TryGetValue(key, out int value) && value > 0)
         {
             return Mathf.Clamp(value, MinPercent, MaxPercent);
         }
 
         return MaxPercent;
+    }
+
+    private Dictionary<string, int> GetLastNonZeroCache(SoundCategory category)
+    {
+        return category switch
+        {
+            SoundCategory.Item => _lastItemNonZeroPercent,
+            SoundCategory.Environment => _lastEnvironmentNonZeroPercent,
+            _ => _lastOtherNonZeroPercent
+        };
     }
 
     private void SetMenuVisible(bool visible)
@@ -1086,7 +1211,6 @@ public class UniversalVolumeControllerPlugin : BaseUnityPlugin
         }
 
         ApplyPlayerControlLock(false);
-
     }
 
     private void ApplyPlayerControlLock(bool locked)
@@ -1153,21 +1277,6 @@ public class UniversalVolumeControllerPlugin : BaseUnityPlugin
         if (property != null && property.CanWrite && property.PropertyType == typeof(bool))
         {
             property.SetValue(target, value);
-        }
-    }
-
-    private static void InvokeIfExists(object target, string methodName)
-    {
-        MethodInfo method = target.GetType().GetMethod(
-            methodName,
-            BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
-            null,
-            Type.EmptyTypes,
-            null
-        );
-        if (method != null && method.GetParameters().Length == 0)
-        {
-            method.Invoke(target, null);
         }
     }
 
@@ -1343,8 +1452,8 @@ public class UniversalVolumeControllerPlugin : BaseUnityPlugin
         Rect buttonRect = GUILayoutUtility.GetLastRect();
         if (_categoryEnableTipTarget == entry && Time.unscaledTime <= _categoryEnableTipUntil)
         {
-            Rect tipRect = new Rect(buttonRect.x - 270f, buttonRect.y + 4f, 260f, Mathf.Max(22f, buttonRect.height));
-            GUI.Label(tipRect, _categoryEnableTipText + " ->", _valueStyle);
+            Rect tipRect = new Rect(buttonRect.xMax + 10f, buttonRect.y + 4f, 320f, Mathf.Max(22f, buttonRect.height));
+            GUI.Label(tipRect, "< " + _categoryEnableTipText, _valueStyle);
         }
 
         GUILayout.EndHorizontal();
@@ -1359,23 +1468,18 @@ public class UniversalVolumeControllerPlugin : BaseUnityPlugin
         }
 
         _categoryEnableTipTarget = target;
-        _categoryEnableTipText = "Enable " + GetCategoryTitle(category) + " above";
+        _categoryEnableTipText = "Enable " + GetCategoryTitle(category);
         _categoryEnableTipUntil = Time.unscaledTime + CategoryEnableTipDuration;
     }
 
     private ConfigEntry<bool> GetCategoryToggleEntry(SoundCategory category)
     {
-        if (category == SoundCategory.Item)
+        return category switch
         {
-            return ItemSoundsEnabled;
-        }
-
-        if (category == SoundCategory.Environment)
-        {
-            return EnvironmentSoundsEnabled;
-        }
-
-        return OtherSoundsEnabled;
+            SoundCategory.Item => ItemSoundsEnabled,
+            SoundCategory.Environment => EnvironmentSoundsEnabled,
+            _ => OtherSoundsEnabled
+        };
     }
 
     private SoundCategory GetCategoryByTab(int tab)
@@ -1395,47 +1499,32 @@ public class UniversalVolumeControllerPlugin : BaseUnityPlugin
 
     private Dictionary<string, ConfigEntry<int>> GetDictionaryByCategory(SoundCategory category)
     {
-        if (category == SoundCategory.Item)
+        return category switch
         {
-            return _itemEntries;
-        }
-
-        if (category == SoundCategory.Environment)
-        {
-            return _environmentEntries;
-        }
-
-        return _otherEntries;
+            SoundCategory.Item => _itemEntries,
+            SoundCategory.Environment => _environmentEntries,
+            _ => _otherEntries
+        };
     }
 
     private bool IsCategoryEnabled(SoundCategory category)
     {
-        if (category == SoundCategory.Item)
+        return category switch
         {
-            return ItemSoundsEnabled.Value;
-        }
-
-        if (category == SoundCategory.Environment)
-        {
-            return EnvironmentSoundsEnabled.Value;
-        }
-
-        return OtherSoundsEnabled.Value;
+            SoundCategory.Item => ItemSoundsEnabled.Value,
+            SoundCategory.Environment => EnvironmentSoundsEnabled.Value,
+            _ => OtherSoundsEnabled.Value
+        };
     }
 
     private static string GetCategoryTitle(SoundCategory category)
     {
-        if (category == SoundCategory.Item)
+        return category switch
         {
-            return "Item Sounds";
-        }
-
-        if (category == SoundCategory.Environment)
-        {
-            return "Environment";
-        }
-
-        return "Other";
+            SoundCategory.Item => "Item Sounds",
+            SoundCategory.Environment => "Environment",
+            _ => "Other"
+        };
     }
 
     private void EnsureStyles()
@@ -1476,11 +1565,6 @@ public class UniversalVolumeControllerPlugin : BaseUnityPlugin
 
         _tabDimStyle = new GUIStyle(_tabStyle);
         _tabDimStyle.normal.textColor = new Color(0.78f, 0.58f, 0.52f, 1f);
-
-        _toggleStyle = new GUIStyle(GUI.skin.toggle);
-        _toggleStyle.fontSize = 20;
-        _toggleStyle.normal.textColor = new Color(1f, 0.9f, 0.82f, 1f);
-        _toggleStyle.onNormal.textColor = new Color(1f, 0.9f, 0.82f, 1f);
 
         _sliderStyle = new GUIStyle(GUI.skin.horizontalSlider);
         _sliderStyle.fixedHeight = 20f;
@@ -1693,7 +1777,7 @@ public class UniversalVolumeControllerPlugin : BaseUnityPlugin
             return false;
         }
 
-        AudioClip clip = explicitClip != null ? explicitClip : (source != null ? source.clip : null);
+        AudioClip clip = explicitClip ?? source?.clip;
         string clipKey = NormalizePreserveDigits(clip != null ? clip.name : string.Empty);
         if (clipKey.StartsWith("boomboxmusic", StringComparison.Ordinal)
             || clipKey.StartsWith("boombox6questionmark", StringComparison.Ordinal)
@@ -1707,7 +1791,7 @@ public class UniversalVolumeControllerPlugin : BaseUnityPlugin
         string path = source != null ? GetHierarchyPath(source.transform) : string.Empty;
         string combined = (objectName + " " + rootName + " " + path).ToLowerInvariant();
 
-        if (combined.Contains("discoball") || (combined.Contains("disco") && combined.Contains("ball")))
+        if (IsDiscoBallText(combined))
         {
             return true;
         }
@@ -1980,7 +2064,7 @@ public class UniversalVolumeControllerPlugin : BaseUnityPlugin
         string clipName = source != null && source.clip != null ? source.clip.name : string.Empty;
         string combined = (rawName + " " + sourceName + " " + rootName + " " + clipName).ToLowerInvariant();
 
-        if (combined.Contains("discoball") || combined.Contains("disco ball") || combined.Contains("disco") && combined.Contains("ball"))
+        if (IsDiscoBallText(combined))
         {
             return SoundCategory.Item;
         }
@@ -2008,6 +2092,18 @@ public class UniversalVolumeControllerPlugin : BaseUnityPlugin
         }
 
         return SoundCategory.Other;
+    }
+
+    private static bool IsDiscoBallText(string value)
+    {
+        if (string.IsNullOrEmpty(value))
+        {
+            return false;
+        }
+
+        return value.Contains("discoball")
+            || value.Contains("disco ball")
+            || (value.Contains("disco") && value.Contains("ball"));
     }
 
     private static bool ContainsAnyKeyword(string value, string[] keywords)
@@ -2085,6 +2181,7 @@ public class UniversalVolumeControllerPlugin : BaseUnityPlugin
 
 internal static class VolumeRuntime
 {
+    private const float MultiplierEpsilon = 0.001f;
     private static readonly Dictionary<int, float> BaseVolumeBySource = new Dictionary<int, float>();
     private static readonly Dictionary<int, float> LastAppliedMultiplierBySource = new Dictionary<int, float>();
     private static readonly Dictionary<int, AudioSource> KnownSources = new Dictionary<int, AudioSource>();
@@ -2105,7 +2202,9 @@ internal static class VolumeRuntime
 
         plugin.LogPlaybackEvent(playbackMethod, source, source.clip);
 
-        if (plugin.ShouldForceDiscoMute(source))
+        float multiplier = plugin.GetMultiplierForSource(source);
+        bool shouldForceMute = plugin.ShouldForceDiscoMute(source) || multiplier <= MultiplierEpsilon;
+        if (shouldForceMute)
         {
             int discoId = source.GetInstanceID();
             lock (Sync)
@@ -2132,7 +2231,6 @@ internal static class VolumeRuntime
             }
         }
 
-        float multiplier = plugin.GetMultiplierForSource(source);
         bool lockManagedBaseVolume = plugin.IsDiscoSource(source, source.clip);
         int id = source.GetInstanceID();
         lock (Sync)
@@ -2151,12 +2249,30 @@ internal static class VolumeRuntime
                 // If another system changed source.volume, absorb that into base volume.
                 if (!lockManagedBaseVolume && Mathf.Abs(source.volume - expected) > 0.01f)
                 {
-                    baseVolume = source.volume / lastMult;
+                    if (lastMult <= MultiplierEpsilon)
+                    {
+                        // When effectively muted, never divide by near-zero multipliers.
+                        // Capture the raw upstream volume directly to avoid huge base-volume spikes.
+                        if (source.volume > 0.0001f)
+                        {
+                            baseVolume = source.volume;
+                        }
+                    }
+                    else
+                    {
+                        baseVolume = source.volume / lastMult;
+                    }
+
                     BaseVolumeBySource[id] = baseVolume;
                 }
             }
 
-            source.volume = Mathf.Clamp(baseVolume * multiplier, 0f, 2f);
+            float targetVolume = Mathf.Clamp(baseVolume * multiplier, 0f, 2f);
+            if (Mathf.Abs(source.volume - targetVolume) > 0.0005f)
+            {
+                source.volume = targetVolume;
+            }
+
             LastAppliedMultiplierBySource[id] = multiplier;
         }
 
@@ -2280,6 +2396,16 @@ internal static class VolumeRuntime
                 continue;
             }
 
+            if (!source.enabled || source.gameObject == null || !source.gameObject.activeInHierarchy)
+            {
+                continue;
+            }
+
+            if (!source.isPlaying)
+            {
+                continue;
+            }
+
             try
             {
                 ApplyForPlay(source, "Refresh");
@@ -2384,7 +2510,7 @@ internal static class VolumeRuntime
             try
             {
                 string root = SafeGetRootName(source);
-                string path = UniversalVolumeControllerPlugin.Instance != null ? UniversalVolumeControllerPlugin.Instance.GetHierarchyPath(source != null ? source.transform : null) : "(none)";
+                string path = plugin.GetHierarchyPath(source.transform);
                 string mixer = source.outputAudioMixerGroup != null ? source.outputAudioMixerGroup.name : "(none)";
                 UniversalVolumeControllerPlugin.Log.LogInfo($"[AudioDiscovery] id={id} name={SafeGetGameObjectName(source)} path={path} root={root} clip={(source.clip != null ? source.clip.name : "(null)")} mixer={mixer} playOnAwake={source.playOnAwake} loop={source.loop} mute={source.mute} spatialBlend={source.spatialBlend:0.00} volume={source.volume:0.000}");
             }
