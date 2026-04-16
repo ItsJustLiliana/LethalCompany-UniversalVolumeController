@@ -19,6 +19,7 @@ Each individual item / sound can be lowered in volume or be fully muted.
 - UI customization with theme color presets and opacity control
 - Automatic runtime discovery and refresh for newly seen audio sources
 - Saves settings between sessions within the same game (SWITCHING TO A NEW GAME DOESNT KEEP THE SETTINGS)
+- Settings tab where you can personalize the menu and a setting to keep audio running in the background (or not)
 
 ### Debug Hotkeys
 
