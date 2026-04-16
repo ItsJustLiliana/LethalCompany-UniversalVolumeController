@@ -32,4 +32,4 @@ Each individual item / sound can be lowered in volume or be fully muted.
 
 ### Known Issues
 
-- Some audio tracks start to stutter when fully muted (this includes Environment, Wind, Bees, and more)
+- Some audio tracks are not in their respective tab yet

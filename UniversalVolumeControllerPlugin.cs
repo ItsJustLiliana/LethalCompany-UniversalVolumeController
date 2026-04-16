@@ -18,7 +18,7 @@ public class UniversalVolumeControllerPlugin : BaseUnityPlugin
 {
     public const string PluginGuid = "com.itsjustliliana.universalvolumecontroller";
     public const string PluginName = "Universal Volume Controller";
-    public const string PluginVersion = "1.1.9";
+    public const string PluginVersion = "1.1.10";
 
     internal static UniversalVolumeControllerPlugin Instance = null!;
     internal static ManualLogSource Log = null!;
@@ -2202,7 +2202,9 @@ internal static class VolumeRuntime
 
         plugin.LogPlaybackEvent(playbackMethod, source, source.clip);
 
-        if (plugin.ShouldForceDiscoMute(source))
+        float multiplier = plugin.GetMultiplierForSource(source);
+        bool shouldForceMute = plugin.ShouldForceDiscoMute(source) || multiplier <= MultiplierEpsilon;
+        if (shouldForceMute)
         {
             int discoId = source.GetInstanceID();
             lock (Sync)
@@ -2229,7 +2231,6 @@ internal static class VolumeRuntime
             }
         }
 
-        float multiplier = plugin.GetMultiplierForSource(source);
         bool lockManagedBaseVolume = plugin.IsDiscoSource(source, source.clip);
         int id = source.GetInstanceID();
         lock (Sync)
@@ -2266,7 +2267,12 @@ internal static class VolumeRuntime
                 }
             }
 
-            source.volume = Mathf.Clamp(baseVolume * multiplier, 0f, 2f);
+            float targetVolume = Mathf.Clamp(baseVolume * multiplier, 0f, 2f);
+            if (Mathf.Abs(source.volume - targetVolume) > 0.0005f)
+            {
+                source.volume = targetVolume;
+            }
+
             LastAppliedMultiplierBySource[id] = multiplier;
         }
 
