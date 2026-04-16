@@ -1468,7 +1468,7 @@ public class UniversalVolumeControllerPlugin : BaseUnityPlugin
         }
 
         _categoryEnableTipTarget = target;
-        _categoryEnableTipText = "Enable " + GetCategoryTitle(category) + " above";
+        _categoryEnableTipText = "Enable " + GetCategoryTitle(category);
         _categoryEnableTipUntil = Time.unscaledTime + CategoryEnableTipDuration;
     }
 
