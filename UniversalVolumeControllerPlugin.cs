@@ -18,7 +18,7 @@ public class UniversalVolumeControllerPlugin : BaseUnityPlugin
 {
     public const string PluginGuid = "com.itsjustliliana.universalvolumecontroller";
     public const string PluginName = "Universal Volume Controller";
-    public const string PluginVersion = "1.1.10";
+    public const string PluginVersion = "1.1.11";
 
     internal static UniversalVolumeControllerPlugin Instance = null!;
     internal static ManualLogSource Log = null!;
@@ -88,6 +88,7 @@ public class UniversalVolumeControllerPlugin : BaseUnityPlugin
     internal ConfigEntry<bool> DebugAudioDiscovery = null!;
     internal ConfigEntry<bool> DebugAudioResolution = null!;
     internal ConfigEntry<bool> DebugInfoByDefault = null!;
+    internal ConfigEntry<bool> KeepAudioWhenUnfocused = null!;
 
     private bool _stylesInitialized;
     private Texture2D _bgTex = null!;
@@ -195,6 +196,7 @@ public class UniversalVolumeControllerPlugin : BaseUnityPlugin
         DebugAudioDiscovery = Config.Bind("Debug", "AudioDiscoveryLogs", false, "Log newly tracked audio sources and resolved keys.");
         DebugAudioResolution = Config.Bind("Debug", "AudioResolutionLogs", false, "Log category/key/multiplier decisions for tracked audio sources.");
         DebugInfoByDefault = Config.Bind("Debug", "PlaybackInfoByDefault", false, "Enable additional playback info logs by default for F5 audio debugging.");
+        KeepAudioWhenUnfocused = Config.Bind("General", "KeepAudioWhenUnfocused", true, "Keep game audio active when the game window is unfocused.");
         _debugAudioPlayback = false;
         _inDepthDebugAudioPlayback = false;
         _infoDebugAudioPlayback = DebugInfoByDefault.Value;
@@ -667,6 +669,19 @@ public class UniversalVolumeControllerPlugin : BaseUnityPlugin
 
     private void ApplyFocusAudioState(bool hasFocus)
     {
+        // Optional focus-based audio pause behavior.
+        // Default keeps audio active while unfocused.
+        if (KeepAudioWhenUnfocused.Value)
+        {
+            if (_audioPausedByPlugin)
+            {
+                AudioListener.pause = _audioPauseStateBeforeFocusLoss;
+                _audioPausedByPlugin = false;
+            }
+
+            return;
+        }
+
         try
         {
             if (hasFocus)
@@ -875,6 +890,15 @@ public class UniversalVolumeControllerPlugin : BaseUnityPlugin
     {
         GUILayout.BeginVertical(_rowBoxStyle);
         GUILayout.Label("Settings", _labelStyle);
+
+        bool previousKeepAudioWhenUnfocused = KeepAudioWhenUnfocused.Value;
+        DrawToggleButtonRow("Keep Audio When Unfocused", KeepAudioWhenUnfocused);
+        if (KeepAudioWhenUnfocused.Value != previousKeepAudioWhenUnfocused)
+        {
+            ApplyFocusAudioState(_isAppFocused);
+        }
+
+        GUILayout.Space(6f);
 
         GUILayout.Label("Theme Color", _valueStyle);
         for (int row = 0; row < 2; row++)
@@ -2182,6 +2206,8 @@ public class UniversalVolumeControllerPlugin : BaseUnityPlugin
 internal static class VolumeRuntime
 {
     private const float MultiplierEpsilon = 0.001f;
+    private const float BaseVolumeAbsorbThreshold = 0.001f;
+    private const float SilenceClampThreshold = 0.0005f;
     private static readonly Dictionary<int, float> BaseVolumeBySource = new Dictionary<int, float>();
     private static readonly Dictionary<int, float> LastAppliedMultiplierBySource = new Dictionary<int, float>();
     private static readonly Dictionary<int, AudioSource> KnownSources = new Dictionary<int, AudioSource>();
@@ -2247,7 +2273,7 @@ internal static class VolumeRuntime
                 float expected = baseVolume * lastMult;
 
                 // If another system changed source.volume, absorb that into base volume.
-                if (!lockManagedBaseVolume && Mathf.Abs(source.volume - expected) > 0.01f)
+                if (!lockManagedBaseVolume && Mathf.Abs(source.volume - expected) > BaseVolumeAbsorbThreshold)
                 {
                     if (lastMult <= MultiplierEpsilon)
                     {
@@ -2268,6 +2294,11 @@ internal static class VolumeRuntime
             }
 
             float targetVolume = Mathf.Clamp(baseVolume * multiplier, 0f, 2f);
+            if (targetVolume <= SilenceClampThreshold)
+            {
+                targetVolume = 0f;
+            }
+
             if (Mathf.Abs(source.volume - targetVolume) > 0.0005f)
             {
                 source.volume = targetVolume;
@@ -2484,6 +2515,23 @@ internal static class VolumeRuntime
         }
     }
 
+    internal static void OnSourceStopped(AudioSource source)
+    {
+        if (source == null)
+        {
+            return;
+        }
+
+        int id = source.GetInstanceID();
+        lock (Sync)
+        {
+            BaseVolumeBySource.Remove(id);
+            LastAppliedMultiplierBySource.Remove(id);
+            LastResolutionBySource.Remove(id);
+            PreviousMuteBySource.Remove(id);
+        }
+    }
+
     private static void TrackSource(AudioSource source)
     {
         if (source == null)
@@ -2605,5 +2653,16 @@ internal static class AudioSourceOneShotPatch
     private static void PlayOneShotHelperPrefix(AudioSource source, AudioClip clip, ref float volumeScale)
     {
         VolumeRuntime.ApplyForOneShot(ref volumeScale, source, clip);
+    }
+}
+
+[HarmonyPatch(typeof(AudioSource))]
+internal static class AudioSourceStopPatch
+{
+    [HarmonyPatch(nameof(AudioSource.Stop), new Type[] { })]
+    [HarmonyPrefix]
+    private static void StopPrefix(AudioSource __instance)
+    {
+        VolumeRuntime.OnSourceStopped(__instance);
     }
 }
