@@ -14,9 +14,9 @@ using UnityEngine.InputSystem;
 [BepInPlugin(PluginGuid, PluginName, PluginVersion)]
 public class UniversalVolumeControllerPlugin : BaseUnityPlugin
 {
-    public const string PluginGuid = "com.marij.universalvolumecontroller";
+    public const string PluginGuid = "com.itsjustliliana.universalvolumecontroller";
     public const string PluginName = "Universal Volume Controller";
-    public const string PluginVersion = "1.0.0";
+    public const string PluginVersion = "1.1.0";
 
     internal static UniversalVolumeControllerPlugin Instance = null!;
     internal static ManualLogSource Log = null!;
@@ -51,6 +51,7 @@ public class UniversalVolumeControllerPlugin : BaseUnityPlugin
     private bool _realtimeRefreshEnabled = true;
     private bool _loggedRealtimeFailure;
     private Coroutine _discoEndOfFrameEnforceCoroutine;
+    private bool _isQuitting;
     private float _nextRealtimeRefreshAt;
     private float _nextRealtimeScanAt;
 
@@ -93,7 +94,6 @@ public class UniversalVolumeControllerPlugin : BaseUnityPlugin
     private GUIStyle _tabStyle = null!;
     private GUIStyle _tabActiveStyle = null!;
     private GUIStyle _tabDimStyle = null!;
-    private GUIStyle _toggleStyle = null!;
     private GUIStyle _sliderStyle = null!;
     private GUIStyle _sliderThumbStyle = null!;
     private GUIStyle _searchFieldStyle = null!;
@@ -111,12 +111,13 @@ public class UniversalVolumeControllerPlugin : BaseUnityPlugin
     private bool _sceneHasDiscoBall;
     private bool _dumpedDiscoAudioGraph;
     private bool _debugAudioPlayback;
-    private bool _indepthDebugAudioPlayback;
+    private bool _inDepthDebugAudioPlayback;
     private bool _infoDebugAudioPlayback;
 
     private const float WindowDragStripHeight = 28f;
     private const float WindowResizeGripHeight = 20f;
     private const float CategoryEnableTipDuration = 5f;
+    private const string SearchBoxControlName = "UniversalVolumeController_SearchBox";
 
     private static readonly HashSet<string> SplitWords = new HashSet<string>
     {
@@ -137,7 +138,7 @@ public class UniversalVolumeControllerPlugin : BaseUnityPlugin
 
     private static readonly string[] OtherKeywords =
     {
-        "terminal", "intercom", "alarm", "speaker", "jingle", "theme", "ui", "menu", "button", "diagetic", "nondiagetic"
+        "terminal", "intercom", "alarm", "speaker", "jingle", "theme", "ui", "menu", "button", "diegetic", "non-diegetic"
     };
 
     private static readonly string[] ThemeNames =
@@ -175,7 +176,7 @@ public class UniversalVolumeControllerPlugin : BaseUnityPlugin
         DebugAudioResolution = Config.Bind("Debug", "AudioResolutionLogs", false, "Log category/key/multiplier decisions for tracked audio sources.");
         DebugInfoByDefault = Config.Bind("Debug", "PlaybackInfoByDefault", false, "Enable additional playback info logs by default for F5 audio debugging.");
         _debugAudioPlayback = false;
-        _indepthDebugAudioPlayback = false;
+        _inDepthDebugAudioPlayback = false;
         _infoDebugAudioPlayback = DebugInfoByDefault.Value;
         if (GlobalPercent.Value > 0)
         {
@@ -188,7 +189,7 @@ public class UniversalVolumeControllerPlugin : BaseUnityPlugin
         _harmony.PatchAll();
 
         Logger.LogInfo($"{PluginName} loaded. Toggle UI with F10.");
-        Logger.LogInfo("Volume changes are client-side only (local AudioSource volume).\n");
+        Logger.LogInfo("Volume changes are client-side only (local AudioSource volume).");
         Logger.LogInfo("F9+F10 prints all active audio sources. F5 toggles playback logs, LeftAlt+F5 toggles in-depth logs, LeftCtrl+F5 toggles info logs, LeftShift+F5 prints managed sound groups.");
 
         if (DebugAudioDiscovery.Value || DebugAudioResolution.Value)
@@ -202,7 +203,6 @@ public class UniversalVolumeControllerPlugin : BaseUnityPlugin
     private void OnDestroy()
     {
         SetMenuVisible(false);
-        _harmony.UnpatchSelf();
 
         if (_discoEndOfFrameEnforceCoroutine != null)
         {
@@ -223,6 +223,21 @@ public class UniversalVolumeControllerPlugin : BaseUnityPlugin
             Destroy(_scrollbarTrackTex);
             Destroy(_searchBgTex);
         }
+
+        if (!ReferenceEquals(Instance, this))
+        {
+            return;
+        }
+
+        if (_isQuitting && _harmony != null)
+        {
+            _harmony.UnpatchSelf();
+        }
+    }
+
+    private void OnApplicationQuit()
+    {
+        _isQuitting = true;
     }
 
     private void Update()
@@ -352,19 +367,13 @@ public class UniversalVolumeControllerPlugin : BaseUnityPlugin
 
         if (altHeld)
         {
-            ToggleIndepthAudioDebug();
+            ToggleInDepthAudioDebug();
             return;
         }
 
         if (ctrlHeld)
         {
             ToggleInfoAudioDebug();
-            return;
-        }
-
-        if (altHeld)
-        {
-            ToggleIndepthAudioDebug();
             return;
         }
 
@@ -387,16 +396,16 @@ public class UniversalVolumeControllerPlugin : BaseUnityPlugin
         _debugAudioPlayback = !_debugAudioPlayback;
         if (!_debugAudioPlayback)
         {
-            _indepthDebugAudioPlayback = false;
+            _inDepthDebugAudioPlayback = false;
         }
 
         Logger.LogInfo($"[AudioDebug] playback logs {(_debugAudioPlayback ? "enabled" : "disabled")}");
     }
 
-    private void ToggleIndepthAudioDebug()
+    private void ToggleInDepthAudioDebug()
     {
         _debugAudioPlayback = !_debugAudioPlayback;
-        _indepthDebugAudioPlayback = _debugAudioPlayback;
+        _inDepthDebugAudioPlayback = _debugAudioPlayback;
         _infoDebugAudioPlayback = _debugAudioPlayback;
         Logger.LogInfo($"[AudioDebug] in-depth playback logs {(_debugAudioPlayback ? "enabled" : "disabled")}");
     }
@@ -536,7 +545,7 @@ public class UniversalVolumeControllerPlugin : BaseUnityPlugin
         string positionText = position.HasValue ? $" pos={position.Value}" : string.Empty;
         string scaleText = volumeScale.HasValue ? $" scale={volumeScale.Value:0.###}" : string.Empty;
 
-        if (!_indepthDebugAudioPlayback)
+        if (!_inDepthDebugAudioPlayback)
         {
             Logger.LogInfo($"[AudioDebug] {methodName} source={sourceName} clip={clipName}{scaleText}{positionText}");
         }
@@ -726,9 +735,9 @@ public class UniversalVolumeControllerPlugin : BaseUnityPlugin
 
         GUILayout.BeginHorizontal(_rowBoxStyle, GUILayout.Height(38f));
         GUILayout.Label("Search", _labelStyle, GUILayout.Width(160f));
-        GUI.SetNextControlName("UniversalVolumeController_SearchBox");
+        GUI.SetNextControlName(SearchBoxControlName);
         string nextSearch = GUILayout.TextField(_searchQuery, _searchFieldStyle, GUILayout.Height(30f), GUILayout.ExpandWidth(true));
-        if (string.IsNullOrWhiteSpace(nextSearch) && GUI.GetNameOfFocusedControl() != "UniversalVolumeController_SearchBox")
+        if (string.IsNullOrWhiteSpace(nextSearch) && GUI.GetNameOfFocusedControl() != SearchBoxControlName)
         {
             Rect lastRect = GUILayoutUtility.GetLastRect();
             GUI.Label(new Rect(lastRect.x + 8f, lastRect.y + 4f, lastRect.width - 8f, lastRect.height - 4f), "Search sounds...", _valueStyle);
@@ -1029,23 +1038,29 @@ public class UniversalVolumeControllerPlugin : BaseUnityPlugin
         }
 
         int clamped = Mathf.Clamp(value, MinPercent, MaxPercent);
-        Dictionary<string, int> cache = category == SoundCategory.Item
-            ? _lastItemNonZeroPercent
-            : (category == SoundCategory.Environment ? _lastEnvironmentNonZeroPercent : _lastOtherNonZeroPercent);
+        Dictionary<string, int> cache = GetLastNonZeroCache(category);
         cache[key] = clamped;
     }
 
     private int GetLastNonZero(SoundCategory category, string key)
     {
-        Dictionary<string, int> cache = category == SoundCategory.Item
-            ? _lastItemNonZeroPercent
-            : (category == SoundCategory.Environment ? _lastEnvironmentNonZeroPercent : _lastOtherNonZeroPercent);
+        Dictionary<string, int> cache = GetLastNonZeroCache(category);
         if (cache.TryGetValue(key, out int value) && value > 0)
         {
             return Mathf.Clamp(value, MinPercent, MaxPercent);
         }
 
         return MaxPercent;
+    }
+
+    private Dictionary<string, int> GetLastNonZeroCache(SoundCategory category)
+    {
+        return category switch
+        {
+            SoundCategory.Item => _lastItemNonZeroPercent,
+            SoundCategory.Environment => _lastEnvironmentNonZeroPercent,
+            _ => _lastOtherNonZeroPercent
+        };
     }
 
     private void SetMenuVisible(bool visible)
@@ -1086,7 +1101,6 @@ public class UniversalVolumeControllerPlugin : BaseUnityPlugin
         }
 
         ApplyPlayerControlLock(false);
-
     }
 
     private void ApplyPlayerControlLock(bool locked)
@@ -1153,21 +1167,6 @@ public class UniversalVolumeControllerPlugin : BaseUnityPlugin
         if (property != null && property.CanWrite && property.PropertyType == typeof(bool))
         {
             property.SetValue(target, value);
-        }
-    }
-
-    private static void InvokeIfExists(object target, string methodName)
-    {
-        MethodInfo method = target.GetType().GetMethod(
-            methodName,
-            BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
-            null,
-            Type.EmptyTypes,
-            null
-        );
-        if (method != null && method.GetParameters().Length == 0)
-        {
-            method.Invoke(target, null);
         }
     }
 
@@ -1365,17 +1364,12 @@ public class UniversalVolumeControllerPlugin : BaseUnityPlugin
 
     private ConfigEntry<bool> GetCategoryToggleEntry(SoundCategory category)
     {
-        if (category == SoundCategory.Item)
+        return category switch
         {
-            return ItemSoundsEnabled;
-        }
-
-        if (category == SoundCategory.Environment)
-        {
-            return EnvironmentSoundsEnabled;
-        }
-
-        return OtherSoundsEnabled;
+            SoundCategory.Item => ItemSoundsEnabled,
+            SoundCategory.Environment => EnvironmentSoundsEnabled,
+            _ => OtherSoundsEnabled
+        };
     }
 
     private SoundCategory GetCategoryByTab(int tab)
@@ -1395,47 +1389,32 @@ public class UniversalVolumeControllerPlugin : BaseUnityPlugin
 
     private Dictionary<string, ConfigEntry<int>> GetDictionaryByCategory(SoundCategory category)
     {
-        if (category == SoundCategory.Item)
+        return category switch
         {
-            return _itemEntries;
-        }
-
-        if (category == SoundCategory.Environment)
-        {
-            return _environmentEntries;
-        }
-
-        return _otherEntries;
+            SoundCategory.Item => _itemEntries,
+            SoundCategory.Environment => _environmentEntries,
+            _ => _otherEntries
+        };
     }
 
     private bool IsCategoryEnabled(SoundCategory category)
     {
-        if (category == SoundCategory.Item)
+        return category switch
         {
-            return ItemSoundsEnabled.Value;
-        }
-
-        if (category == SoundCategory.Environment)
-        {
-            return EnvironmentSoundsEnabled.Value;
-        }
-
-        return OtherSoundsEnabled.Value;
+            SoundCategory.Item => ItemSoundsEnabled.Value,
+            SoundCategory.Environment => EnvironmentSoundsEnabled.Value,
+            _ => OtherSoundsEnabled.Value
+        };
     }
 
     private static string GetCategoryTitle(SoundCategory category)
     {
-        if (category == SoundCategory.Item)
+        return category switch
         {
-            return "Item Sounds";
-        }
-
-        if (category == SoundCategory.Environment)
-        {
-            return "Environment";
-        }
-
-        return "Other";
+            SoundCategory.Item => "Item Sounds",
+            SoundCategory.Environment => "Environment",
+            _ => "Other"
+        };
     }
 
     private void EnsureStyles()
@@ -1476,11 +1455,6 @@ public class UniversalVolumeControllerPlugin : BaseUnityPlugin
 
         _tabDimStyle = new GUIStyle(_tabStyle);
         _tabDimStyle.normal.textColor = new Color(0.78f, 0.58f, 0.52f, 1f);
-
-        _toggleStyle = new GUIStyle(GUI.skin.toggle);
-        _toggleStyle.fontSize = 20;
-        _toggleStyle.normal.textColor = new Color(1f, 0.9f, 0.82f, 1f);
-        _toggleStyle.onNormal.textColor = new Color(1f, 0.9f, 0.82f, 1f);
 
         _sliderStyle = new GUIStyle(GUI.skin.horizontalSlider);
         _sliderStyle.fixedHeight = 20f;
@@ -1693,7 +1667,7 @@ public class UniversalVolumeControllerPlugin : BaseUnityPlugin
             return false;
         }
 
-        AudioClip clip = explicitClip != null ? explicitClip : (source != null ? source.clip : null);
+        AudioClip clip = explicitClip ?? source?.clip;
         string clipKey = NormalizePreserveDigits(clip != null ? clip.name : string.Empty);
         if (clipKey.StartsWith("boomboxmusic", StringComparison.Ordinal)
             || clipKey.StartsWith("boombox6questionmark", StringComparison.Ordinal)
@@ -1707,7 +1681,7 @@ public class UniversalVolumeControllerPlugin : BaseUnityPlugin
         string path = source != null ? GetHierarchyPath(source.transform) : string.Empty;
         string combined = (objectName + " " + rootName + " " + path).ToLowerInvariant();
 
-        if (combined.Contains("discoball") || (combined.Contains("disco") && combined.Contains("ball")))
+        if (IsDiscoBallText(combined))
         {
             return true;
         }
@@ -1980,7 +1954,7 @@ public class UniversalVolumeControllerPlugin : BaseUnityPlugin
         string clipName = source != null && source.clip != null ? source.clip.name : string.Empty;
         string combined = (rawName + " " + sourceName + " " + rootName + " " + clipName).ToLowerInvariant();
 
-        if (combined.Contains("discoball") || combined.Contains("disco ball") || combined.Contains("disco") && combined.Contains("ball"))
+        if (IsDiscoBallText(combined))
         {
             return SoundCategory.Item;
         }
@@ -2008,6 +1982,18 @@ public class UniversalVolumeControllerPlugin : BaseUnityPlugin
         }
 
         return SoundCategory.Other;
+    }
+
+    private static bool IsDiscoBallText(string value)
+    {
+        if (string.IsNullOrEmpty(value))
+        {
+            return false;
+        }
+
+        return value.Contains("discoball")
+            || value.Contains("disco ball")
+            || (value.Contains("disco") && value.Contains("ball"));
     }
 
     private static bool ContainsAnyKeyword(string value, string[] keywords)
@@ -2384,7 +2370,7 @@ internal static class VolumeRuntime
             try
             {
                 string root = SafeGetRootName(source);
-                string path = UniversalVolumeControllerPlugin.Instance != null ? UniversalVolumeControllerPlugin.Instance.GetHierarchyPath(source != null ? source.transform : null) : "(none)";
+                string path = plugin.GetHierarchyPath(source.transform);
                 string mixer = source.outputAudioMixerGroup != null ? source.outputAudioMixerGroup.name : "(none)";
                 UniversalVolumeControllerPlugin.Log.LogInfo($"[AudioDiscovery] id={id} name={SafeGetGameObjectName(source)} path={path} root={root} clip={(source.clip != null ? source.clip.name : "(null)")} mixer={mixer} playOnAwake={source.playOnAwake} loop={source.loop} mute={source.mute} spatialBlend={source.spatialBlend:0.00} volume={source.volume:0.000}");
             }

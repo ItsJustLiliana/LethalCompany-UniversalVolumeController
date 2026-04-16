@@ -34,7 +34,7 @@
       <HintPath>dependencies\UnityEngine.AudioModule.dll</HintPath>
     </Reference>
 
-    <!-- FIXES -->
+    <!-- Additional Unity modules required for IMGUI/input support -->
     <Reference Include="UnityEngine.UIModule">
       <HintPath>dependencies\UnityEngine.UIModule.dll</HintPath>
     </Reference>

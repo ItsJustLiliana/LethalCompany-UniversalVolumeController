@@ -2,13 +2,13 @@
 
 Client-side volume control for all items and other sounds within the game
 
-Tired of loud noises? Tired of your friends blasting the air horn in your ears? TURN IT OFF
+Tired of loud noises? Tired of your friends blasting the air horn in your ears? TURN IT OFF!
 Each individual item / sound can be lowered in volume or be fully muted.
 
 ## Features
 
 - In-game menu toggle by pressing ```F10```
-- Global volume slider with quick mute and unmute.
+- Global volume slider with quick mute and unmute
 - Per-category controls for:
   - Item Sounds
   - Environment
