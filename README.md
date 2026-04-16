@@ -25,6 +25,11 @@ Each individual item / sound can be lowered in volume or be fully muted.
 - ```F9``` + ```F10```: Dump active audio sources to the log
 - ```F9``` + ```F10``` + ```LeftCtrl```: Dump all audio sources (including non-playing)
 
-## Notes
+### Notes
 
-- This mod is designed for player-side control and does not synchronize volume values to other players
+- This mod is designed for player-side control and does not synchronize volume values to other players.
+- Some audio tracks don't seem to lower in volume, but that's because it is barely noticable sometimes. When dropping it beneath 50% you'll most likely start to hear the difference. I might tweak that in a later version.
+
+### Known Issues
+
+- Some audio tracks start to stutter when fully muted (this includes Environment, Wind, Bees, and more)
