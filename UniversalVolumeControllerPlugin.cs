@@ -9,17 +9,24 @@ using BepInEx.Configuration;
 using BepInEx.Logging;
 using HarmonyLib;
 using UnityEngine;
+using LethalCompanyInputUtils.Api;
 using UnityEngine.InputSystem;
 
+[BepInDependency("com.rune580.LethalCompanyInputUtils", BepInDependency.DependencyFlags.HardDependency)]
 [BepInPlugin(PluginGuid, PluginName, PluginVersion)]
 public class UniversalVolumeControllerPlugin : BaseUnityPlugin
 {
     public const string PluginGuid = "com.itsjustliliana.universalvolumecontroller";
     public const string PluginName = "Universal Volume Controller";
-    public const string PluginVersion = "1.1.0";
+    public const string PluginVersion = "1.1.9";
 
     internal static UniversalVolumeControllerPlugin Instance = null!;
     internal static ManualLogSource Log = null!;
+    private static bool _respawnAttempted;
+    private static bool _harmonyPatched;
+    private static bool _startupHintsLogged;
+    private static UniversalVolumeControllerInputActions _sharedInputActions = null!;
+    private static bool _sharedInputActionsInitialized;
 
     private const int MinPercent = 1;
     private const int MaxPercent = 100;
@@ -50,10 +57,13 @@ public class UniversalVolumeControllerPlugin : BaseUnityPlugin
     private CursorLockMode _previousCursorLockState;
     private bool _realtimeRefreshEnabled = true;
     private bool _loggedRealtimeFailure;
-    private Coroutine _discoEndOfFrameEnforceCoroutine;
     private bool _isQuitting;
+    private UniversalVolumeControllerInputActions _inputActions = null!;
     private float _nextRealtimeRefreshAt;
     private float _nextRealtimeScanAt;
+    private bool _loggedNullActionReferences;
+    private bool _audioPausedByPlugin;
+    private bool _audioPauseStateBeforeFocusLoss;
 
     private readonly object _lock = new object();
     private readonly Dictionary<string, ConfigEntry<int>> _itemEntries = new Dictionary<string, ConfigEntry<int>>();
@@ -118,6 +128,8 @@ public class UniversalVolumeControllerPlugin : BaseUnityPlugin
     private const float WindowResizeGripHeight = 20f;
     private const float CategoryEnableTipDuration = 5f;
     private const string SearchBoxControlName = "UniversalVolumeController_SearchBox";
+    private const float RealtimeRefreshInterval = 0.14f;
+    private const float RealtimeScanInterval = 2.0f;
 
     private static readonly HashSet<string> SplitWords = new HashSet<string>
     {
@@ -162,8 +174,16 @@ public class UniversalVolumeControllerPlugin : BaseUnityPlugin
 
     private void Awake()
     {
+        if (Instance != null && !ReferenceEquals(Instance, this))
+        {
+            Logger.LogWarning($"Duplicate plugin instance detected; destroying this instance id={GetInstanceID()} existingId={Instance.GetInstanceID()}");
+            Destroy(this);
+            return;
+        }
+
         Instance = this;
         Log = Logger;
+        DontDestroyOnLoad(gameObject);
 
         ModEnabled = Config.Bind("General", "Enabled", true, "Enable or disable this mod entirely.");
         GlobalPercent = Config.Bind("General", "GlobalPercent", 100, new ConfigDescription("Global volume percentage.", new AcceptableValueRange<int>(0, MaxPercent)));
@@ -184,30 +204,88 @@ public class UniversalVolumeControllerPlugin : BaseUnityPlugin
         }
 
         BuildDefaultAliases();
+        try
+        {
+            if (!_sharedInputActionsInitialized)
+            {
+                _sharedInputActions = new UniversalVolumeControllerInputActions();
+                _sharedInputActions.Enable();
+                _sharedInputActionsInitialized = true;
+            }
+
+            _inputActions = _sharedInputActions;
+        }
+        catch (Exception ex)
+        {
+            _inputActions = null!;
+            Logger.LogError($"Input action initialization failed. {ex}");
+        }
 
         _harmony = new Harmony(PluginGuid);
-        _harmony.PatchAll();
+        if (!_harmonyPatched)
+        {
+            _harmony.PatchAll();
+            _harmonyPatched = true;
+        }
 
-        Logger.LogInfo($"{PluginName} loaded. Toggle UI with F10.");
-        Logger.LogInfo("Volume changes are client-side only (local AudioSource volume).");
-        Logger.LogInfo("F9+F10 prints all active audio sources. F5 toggles playback logs, LeftAlt+F5 toggles in-depth logs, LeftCtrl+F5 toggles info logs, LeftShift+F5 prints managed sound groups.");
+        if (!_startupHintsLogged)
+        {
+            _startupHintsLogged = true;
+            Logger.LogInfo($"{PluginName} loaded. Toggle UI with F10");
+            //Logger.LogInfo("Volume changes are client-side only (local AudioSource volume)");
+            //Logger.LogInfo("F9+F10 prints all active audio sources. F5 toggles playback logs, LeftAlt+F5 toggles in-depth logs, LeftCtrl+F5 toggles info logs, LeftShift+F5 prints managed sound groups");
+        }
 
         if (DebugAudioDiscovery.Value || DebugAudioResolution.Value)
         {
             Logger.LogInfo($"[Debug] discovery={DebugAudioDiscovery.Value} resolution={DebugAudioResolution.Value} items={ItemSoundsEnabled.Value} env={EnvironmentSoundsEnabled.Value} other={OtherSoundsEnabled.Value} opacity={OpacityPercent.Value} theme={ThemeColorIndex.Value}");
         }
 
-        _discoEndOfFrameEnforceCoroutine = StartCoroutine(DiscoEndOfFrameEnforceLoop());
     }
 
     private void OnDestroy()
     {
+        if (!ReferenceEquals(Instance, this))
+        {
+            return;
+        }
+
+        if (!_isQuitting && !_respawnAttempted)
+        {
+            _respawnAttempted = true;
+            try
+            {
+                Instance = null!;
+                GameObject host = new GameObject("UniversalVolumeControllerHost");
+                DontDestroyOnLoad(host);
+                host.AddComponent<UniversalVolumeControllerPlugin>();
+                // Logger.LogWarning("Unexpected plugin teardown detected; respawned plugin on UniversalVolumeControllerHost.");
+            }
+            catch (Exception ex)
+            {
+                Logger.LogError($"Failed to respawn plugin after unexpected teardown: {ex}");
+            }
+        }
+
         SetMenuVisible(false);
 
-        if (_discoEndOfFrameEnforceCoroutine != null)
+        if (_inputActions != null)
         {
-            StopCoroutine(_discoEndOfFrameEnforceCoroutine);
-            _discoEndOfFrameEnforceCoroutine = null;
+            try
+            {
+                if (_isQuitting && _sharedInputActionsInitialized && _sharedInputActions != null)
+                {
+                    _sharedInputActions.Disable();
+                    _sharedInputActions = null!;
+                    _sharedInputActionsInitialized = false;
+                }
+            }
+            catch
+            {
+                // Ignore shutdown issues.
+            }
+
+            _inputActions = null!;
         }
 
         if (_bgTex != null)
@@ -224,14 +302,15 @@ public class UniversalVolumeControllerPlugin : BaseUnityPlugin
             Destroy(_searchBgTex);
         }
 
-        if (!ReferenceEquals(Instance, this))
+        if (ReferenceEquals(Instance, this))
         {
-            return;
+            Instance = null!;
         }
 
         if (_isQuitting && _harmony != null)
         {
             _harmony.UnpatchSelf();
+            _harmonyPatched = false;
         }
     }
 
@@ -242,34 +321,58 @@ public class UniversalVolumeControllerPlugin : BaseUnityPlugin
 
     private void Update()
     {
+        Keyboard keyboard = Keyboard.current;
+
+        if (_inputActions == null)
+        {
+            return;
+        }
+
+        InputAction toggleAction = _inputActions.ToggleMenuKey;
+        InputAction dumpAction = _inputActions.DumpAudioKey;
+        InputAction debugAction = _inputActions.AudioDebugKey;
+        InputAction closeAction = _inputActions.CloseMenuKey;
+        if (toggleAction == null || dumpAction == null || debugAction == null || closeAction == null)
+        {
+            if (!_loggedNullActionReferences)
+            {
+                Logger.LogWarning($"One or more input actions are null. toggleNull={(toggleAction == null)} dumpNull={(dumpAction == null)} debugNull={(debugAction == null)} closeNull={(closeAction == null)}");
+                _loggedNullActionReferences = true;
+            }
+
+            return;
+        }
+
+        if (toggleAction.triggered)
+        {
+            SetMenuVisible(!_uiVisible);
+        }
+
         if (!_isAppFocused)
         {
             return;
         }
 
-        Keyboard keyboard = Keyboard.current;
-        if (IsAudioDumpComboPressed(keyboard))
+        if (dumpAction.triggered && toggleAction.IsPressed())
         {
-            bool includeAllSources = keyboard != null && (keyboard.leftCtrlKey.isPressed || keyboard.rightCtrlKey.isPressed);
+            bool includeAllSources = IsCtrlHeld(keyboard);
             DumpAllActiveAudioSources(includeHierarchy: false, includeExtraInfo: false, includeAllSources: includeAllSources);
             return;
         }
 
-        if (keyboard != null && keyboard.f10Key.wasPressedThisFrame)
+        if (debugAction.triggered)
         {
-            SetMenuVisible(!_uiVisible);
+            HandleAudioDebugHotkeys(keyboard);
         }
 
-        HandleAudioDebugHotkeys(keyboard);
-
-        if (_uiVisible && keyboard != null && keyboard.escapeKey.wasPressedThisFrame)
+        if (_uiVisible && closeAction.triggered)
         {
             SetMenuVisible(false);
         }
 
         if (_realtimeRefreshEnabled && Time.unscaledTime >= _nextRealtimeRefreshAt)
         {
-            _nextRealtimeRefreshAt = Time.unscaledTime + 0.08f;
+            _nextRealtimeRefreshAt = Time.unscaledTime + RealtimeRefreshInterval;
             try
             {
                 VolumeRuntime.RefreshKnownSources();
@@ -286,7 +389,7 @@ public class UniversalVolumeControllerPlugin : BaseUnityPlugin
 
         if (_realtimeRefreshEnabled && Time.unscaledTime >= _nextRealtimeScanAt)
         {
-            _nextRealtimeScanAt = Time.unscaledTime + 1.0f;
+            _nextRealtimeScanAt = Time.unscaledTime + RealtimeScanInterval;
             try
             {
                 VolumeRuntime.ScanActiveSources();
@@ -325,39 +428,11 @@ public class UniversalVolumeControllerPlugin : BaseUnityPlugin
         }
     }
 
-    private IEnumerator DiscoEndOfFrameEnforceLoop()
-    {
-        WaitForEndOfFrame wait = new WaitForEndOfFrame();
-        while (true)
-        {
-            yield return wait;
-
-            if (!_isAppFocused || !_realtimeRefreshEnabled)
-            {
-                continue;
-            }
-
-            try
-            {
-                VolumeRuntime.RefreshDiscoSourcesLate();
-            }
-            catch
-            {
-                // Keep this hard-enforcement loop resilient.
-            }
-        }
-    }
-
     private void HandleAudioDebugHotkeys(Keyboard keyboard)
     {
-        if (keyboard == null || !keyboard.f5Key.wasPressedThisFrame)
-        {
-            return;
-        }
-
-        bool altHeld = keyboard.leftAltKey.isPressed || keyboard.rightAltKey.isPressed;
-        bool ctrlHeld = keyboard.leftCtrlKey.isPressed || keyboard.rightCtrlKey.isPressed;
-        bool shiftHeld = keyboard.leftShiftKey.isPressed || keyboard.rightShiftKey.isPressed;
+        bool altHeld = IsAltHeld(keyboard);
+        bool ctrlHeld = IsCtrlHeld(keyboard);
+        bool shiftHeld = IsShiftHeld(keyboard);
 
         if (shiftHeld)
         {
@@ -380,17 +455,21 @@ public class UniversalVolumeControllerPlugin : BaseUnityPlugin
         ToggleAudioDebug();
     }
 
-    private static bool IsAudioDumpComboPressed(Keyboard keyboard)
+    private bool IsAltHeld(Keyboard keyboard)
     {
-        if (keyboard == null)
-        {
-            return false;
-        }
-
-        bool bothDown = keyboard.f9Key.isPressed && keyboard.f10Key.isPressed;
-        bool eitherPressedThisFrame = keyboard.f9Key.wasPressedThisFrame || keyboard.f10Key.wasPressedThisFrame;
-        return bothDown && eitherPressedThisFrame;
+        return keyboard != null && (keyboard.leftAltKey.isPressed || keyboard.rightAltKey.isPressed);
     }
+
+    private bool IsCtrlHeld(Keyboard keyboard)
+    {
+        return keyboard != null && (keyboard.leftCtrlKey.isPressed || keyboard.rightCtrlKey.isPressed);
+    }
+
+    private bool IsShiftHeld(Keyboard keyboard)
+    {
+        return keyboard != null && (keyboard.leftShiftKey.isPressed || keyboard.rightShiftKey.isPressed);
+    }
+
     private void ToggleAudioDebug()
     {
         _debugAudioPlayback = !_debugAudioPlayback;
@@ -565,22 +644,53 @@ public class UniversalVolumeControllerPlugin : BaseUnityPlugin
     private void OnApplicationFocus(bool hasFocus)
     {
         _isAppFocused = hasFocus;
+        ApplyFocusAudioState(hasFocus);
         if (!hasFocus)
         {
             SetMenuVisible(false);
             return;
         }
 
-        _nextRealtimeRefreshAt = Time.unscaledTime + 0.1f;
-        _nextRealtimeScanAt = Time.unscaledTime + 0.5f;
+        _nextRealtimeRefreshAt = Time.unscaledTime + 0.06f;
+        _nextRealtimeScanAt = Time.unscaledTime + 0.2f;
     }
 
     private void OnApplicationPause(bool paused)
     {
         _isAppFocused = !paused;
+        ApplyFocusAudioState(!paused);
         if (paused)
         {
             SetMenuVisible(false);
+        }
+    }
+
+    private void ApplyFocusAudioState(bool hasFocus)
+    {
+        try
+        {
+            if (hasFocus)
+            {
+                if (_audioPausedByPlugin)
+                {
+                    AudioListener.pause = _audioPauseStateBeforeFocusLoss;
+                    _audioPausedByPlugin = false;
+                }
+
+                return;
+            }
+
+            if (!_audioPausedByPlugin)
+            {
+                _audioPauseStateBeforeFocusLoss = AudioListener.pause;
+            }
+
+            AudioListener.pause = true;
+            _audioPausedByPlugin = true;
+        }
+        catch
+        {
+            // Ignore focus-related audio state failures and keep gameplay stable.
         }
     }
 
@@ -1342,8 +1452,8 @@ public class UniversalVolumeControllerPlugin : BaseUnityPlugin
         Rect buttonRect = GUILayoutUtility.GetLastRect();
         if (_categoryEnableTipTarget == entry && Time.unscaledTime <= _categoryEnableTipUntil)
         {
-            Rect tipRect = new Rect(buttonRect.x - 270f, buttonRect.y + 4f, 260f, Mathf.Max(22f, buttonRect.height));
-            GUI.Label(tipRect, _categoryEnableTipText + " ->", _valueStyle);
+            Rect tipRect = new Rect(buttonRect.xMax + 10f, buttonRect.y + 4f, 320f, Mathf.Max(22f, buttonRect.height));
+            GUI.Label(tipRect, "< " + _categoryEnableTipText, _valueStyle);
         }
 
         GUILayout.EndHorizontal();
@@ -2071,6 +2181,7 @@ public class UniversalVolumeControllerPlugin : BaseUnityPlugin
 
 internal static class VolumeRuntime
 {
+    private const float MultiplierEpsilon = 0.001f;
     private static readonly Dictionary<int, float> BaseVolumeBySource = new Dictionary<int, float>();
     private static readonly Dictionary<int, float> LastAppliedMultiplierBySource = new Dictionary<int, float>();
     private static readonly Dictionary<int, AudioSource> KnownSources = new Dictionary<int, AudioSource>();
@@ -2137,7 +2248,20 @@ internal static class VolumeRuntime
                 // If another system changed source.volume, absorb that into base volume.
                 if (!lockManagedBaseVolume && Mathf.Abs(source.volume - expected) > 0.01f)
                 {
-                    baseVolume = source.volume / lastMult;
+                    if (lastMult <= MultiplierEpsilon)
+                    {
+                        // When effectively muted, never divide by near-zero multipliers.
+                        // Capture the raw upstream volume directly to avoid huge base-volume spikes.
+                        if (source.volume > 0.0001f)
+                        {
+                            baseVolume = source.volume;
+                        }
+                    }
+                    else
+                    {
+                        baseVolume = source.volume / lastMult;
+                    }
+
                     BaseVolumeBySource[id] = baseVolume;
                 }
             }
@@ -2262,6 +2386,16 @@ internal static class VolumeRuntime
         {
             AudioSource source = snapshot[i];
             if (source == null)
+            {
+                continue;
+            }
+
+            if (!source.enabled || source.gameObject == null || !source.gameObject.activeInHierarchy)
+            {
+                continue;
+            }
+
+            if (!source.isPlaying)
             {
                 continue;
             }

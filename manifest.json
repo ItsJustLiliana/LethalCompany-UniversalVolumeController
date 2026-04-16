@@ -1,9 +1,10 @@
 {
     "name": "UniversalVolumeController",
-    "version_number": "1.1.0",
+    "version_number": "1.1.9",
     "website_url": "https://github.com/ItsJustLiliana/LethalCompany-UniversalVolumeController",
     "description": "Client-side volume control for all items and other sounds within the game",
     "dependencies": [
-        "BepInEx-BepInExPack-5.4.2100"
+        "BepInEx-BepInExPack-5.4.2305",
+        "Rune580-LethalCompany_InputUtils-0.7.13"
     ]
 }

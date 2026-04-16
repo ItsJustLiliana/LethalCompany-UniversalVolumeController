@@ -63,6 +63,11 @@
       <HintPath>dependencies\Unity.InputSystem.dll</HintPath>
     </Reference>
 
+    <Reference Include="LethalCompanyInputUtils">
+      <HintPath>dependencies\LethalCompanyInputUtils.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+
   </ItemGroup>
 
 </Project>
